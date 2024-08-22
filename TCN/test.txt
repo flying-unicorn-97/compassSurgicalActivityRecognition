@@ -1,0 +1,2 @@
+7
+default interpreter:  /usr/bin/python

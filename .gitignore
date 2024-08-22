@@ -1,0 +1,6 @@
+Datasets/
+Figures/
+Context Labeling App/Datasets
+Context Labeling App/compass-env
+Context Labeling App/__pycache__
+.vscode/launch.json

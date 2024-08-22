@@ -1,0 +1,143 @@
+# Tune learning rate, batch size weight decay, and number of epochs
+# Make sure to run preprocess.py <set> <var> <labeltype> <valtype>
+# before tune.py with the same arguments
+
+from config import input_size, val_type, num_class, raw_feature_dir, validation_trial, validation_trial_train, sample_rate,dataset_name
+from ray import tune
+from ray.tune.schedulers import ASHAScheduler
+from ray.tune import CLIReporter
+from functools import partial
+from lstm_model import LSTM_Layer
+from train_test_val import train_model_parameter, test_model
+import numpy as np
+import torch
+import os
+import sys
+import pdb
+from utils import get_cross_val_splits, get_cross_val_splits_LOUO
+from data_loading import RawFeatureDataset
+from logger import Logger
+import utils
+import torch
+import torch.nn as nn
+import json
+
+from preprocess import processArguments
+
+global val_type
+
+# Modify config.json values based on best config found
+def updateJSONtcnparams(dataset_name, batch_size, epoch, learning_rate, weight_decay):
+    # dataset_name passed as argument from command line
+    print("Updating tcn params in config for " + dataset_name + " with " + var + " and " + labeltype + "...")
+
+    # Load saved parameters from json
+    all_params = json.load(open('config.json'))
+
+
+    # Make changes to params:
+    # Update tcn params
+    all_params[dataset_name]["tcn_params"]["config"]["batch_size"] = batch_size
+    all_params[dataset_name]["tcn_params"]["config"]["epoch"] = epoch
+    all_params[dataset_name]["tcn_params"]["config"]["learning_rate"] = learning_rate
+    all_params[dataset_name]["tcn_params"]["config"]["weight_decay"] = weight_decay
+
+    # Write updated params to config.json
+    with open('config.json', 'w') as jF:
+        json.dump(all_params, jF, indent=4, sort_keys=True)
+
+
+def tuneParams(rate, size, decay, num_samples=1, max_num_epochs=50):
+    #print(rate)
+    #print(size)
+    #print(decay)
+    # For parameter tuning:
+    # ******check whether the sampling method of tuning params is appropriate
+    if rate == 0:
+        config = {"learning_rate":tune.loguniform(1e-5,1e-3), "batch_size":1, "weight_decay": tune.loguniform(1e-4,1e-2)}
+    else:
+        config = {"learning_rate":rate, "batch_size":size, "weight_decay": decay}
+
+    scheduler = ASHAScheduler(
+        metric="loss",
+        mode="min",
+        max_t=max_num_epochs,
+        grace_period=5,
+        reduction_factor=2)
+    reporter = CLIReporter(
+        # parameter_columns=["l1", "l2", "lr", "batch_size"],
+        metric_columns=["loss", "accuracy", "training_iteration"])   # 指定的指标列会在训练中以dataframe的形式进行打印
+    result = tune.run(
+        partial(train_model_parameter,type='tcn',input_size=input_size,\
+             num_class=num_class,num_epochs=max_num_epochs,dataset_name=dataset_name,\
+                 sample_rate=sample_rate),             # partial中指定训练函数和不调整的模型参数---训练函数中用到不调整的模型参数
+        resources_per_trial={"cpu": 6, "gpu": 1},      # 根据计算机性能自行调整
+        config=config,                                 # 需要利用tune动态调整的参数
+        num_samples=num_samples,
+        scheduler=scheduler,
+        progress_reporter=reporter)
+
+
+    best_trial = result.get_best_trial("loss", "min", "last")
+    print("Best trial config: {}".format(best_trial.config))
+    print("Best trial final validation loss: {}".format(
+        best_trial.last_result["loss"]))
+    print("Best trial final validation accuracy: {}".format(
+        best_trial.last_result["accuracy"]))
+
+    #print(best_trial.config)
+    rate = best_trial.config['learning_rate']
+    #print(rate)
+    size = best_trial.config['batch_size']
+    decay = best_trial.config['weight_decay']
+
+    return rate, size, decay
+
+
+if __name__ == "__main__":
+    global valtype
+    # Process arguments from command line and get set, var, and labeltype
+    set, var, labeltype, valtype = processArguments(sys.argv)
+    """模型调优后的参数更新到json中
+    
+
+    # loadConfig() not needed here assuming preprocess.py was run
+    # immediately before this which correctly updates config.json
+    # and sets up the training data and pkl files for this tuning
+
+
+    # 7/22/22 By-passing tuning and using hyperparameter values determined
+    # using a gridsearch for learning_rate and weight_decay on
+    # JIGSAWS gesture velocity LOSO/LOUO
+    # hardcode batch_size=1 and epoch=60
+    if valtype == "LOSO":
+        updateJSONtcnparams(set, 1, 60, 0.00005, 0.01) # based on JIGSAWS gesture velocity LOSO
+        #updateJSONtcnparams(set, 1, 60, 0.0001, 0.0001)  # based on JIGSAWS MPbaseline velocity LOSO
+    elif valtype == "LOUO":
+        updateJSONtcnparams(set, 1, 60, 0.00005, 0.0005) # based on JIGSAWS gesture velocity LOUO
+        #updateJSONtcnparams(set, 1, 60, 0.0001, 0.001) # based on JIGSAWS MPbaseline velocity LOUO
+    elif valtype == "LOTO":
+        updateJSONtcnparams(set, 1, 60, 0.0001, 0.001)   # based on JIGSAWS gesture velocity LOTO
+    """
+
+
+    #step1 :训练模型，调整超参数
+    # Number of CPU and GPU resources are hard coded in main_tcn, make
+    # sure to change if running on a different computer
+    # First, tune learning rate, batch size, and weight decay
+    # num_samples represents num_trail
+    rate, size, decay = tuneParams(0, 0, 0, num_samples=100, max_num_epochs=30)
+
+    #step2:将超参数调优的返回值更新到json中
+    '''
+    # Hard coded for now...
+    epoch = 50
+    # Update json
+    updateJSONtcnparams(set, size, epoch, rate, decay)
+
+    #step3:将json最近一次更新的参数用于模型训练，以获取最佳的epochs
+    # Then, pass returned config to next tuning loop to tune number of epochs
+    tuneParams(rate, size, decay, num_samples=1, max_num_epochs=60)          # 返回误差最小的模型参数learning_rate、batch_size、decay
+    '''
+
+    print("tune.py running over")
